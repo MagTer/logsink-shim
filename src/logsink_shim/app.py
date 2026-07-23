@@ -144,6 +144,8 @@ async def ingest(request: Request) -> Response:
         }
         if "tag" in entry:
             line["tag"] = str(entry["tag"])
+        if "device" in entry:
+            line["device"] = str(entry["device"])
         if "ts" in entry:
             line["_time"] = entry["ts"]
         out_lines.append(json.dumps(line, ensure_ascii=False))

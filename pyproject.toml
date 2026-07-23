@@ -1,6 +1,6 @@
 [project]
 name = "logsink-shim"
-version = "0.2.0"
+version = "0.3.0"
 description = "Auth/quota edge in front of VictoriaLogs for app-development logs"
 requires-python = ">=3.12"
 dependencies = [

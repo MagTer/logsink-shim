@@ -54,6 +54,12 @@ def test_ingest_stamps_app_server_side(client, captured_vl):
     assert captured_vl["params"]["_stream_fields"] == "app"
 
 
+def test_device_field_passes_through(client, captured_vl):
+    batch = json.dumps({"msg": "hi", "level": "ERROR", "device": "Volvo XC60"})
+    assert client.post("/ingest", content=batch, headers=auth()).status_code == 204
+    assert captured_vl["lines"][0]["device"] == "Volvo XC60"
+
+
 def test_drops_lines_below_configured_level(client, captured_vl):
     batch = "\n".join(
         json.dumps(e)
