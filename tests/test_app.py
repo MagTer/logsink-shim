@@ -89,8 +89,9 @@ def test_config_returns_per_app_level(client):
     assert client.get("/ingest/config", headers=auth("sekret2")).json()["level"] == "ERROR"
 
 
-def test_admin_fails_closed_without_token(client, monkeypatch):
+def test_admin_fails_closed_without_token_and_emails(client, monkeypatch):
     monkeypatch.delenv("LOGSINK_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("LOGSINK_ADMIN_EMAILS", raising=False)
     shim.state = shim.State()
     resp = TestClient(shim.app).put(
         "/admin/level/retro-fm",
@@ -98,6 +99,34 @@ def test_admin_fails_closed_without_token(client, monkeypatch):
         headers=auth("anything"),
     )
     assert resp.status_code == 503
+
+
+def test_admin_accepts_gate_forwarded_email(client, monkeypatch):
+    monkeypatch.setenv("LOGSINK_ADMIN_EMAILS", "Operator@Example.COM")
+    shim.state = shim.State()
+    c = TestClient(shim.app)
+    ok = c.put(
+        "/admin/level/retro-fm",
+        json={"level": "DEBUG"},
+        headers={"X-Auth-Request-Email": "operator@example.com"},
+    )
+    assert ok.status_code == 200
+    denied = c.put(
+        "/admin/level/retro-fm",
+        json={"level": "DEBUG"},
+        headers={"X-Auth-Request-Email": "intruder@example.com"},
+    )
+    assert denied.status_code == 401
+
+
+def test_admin_page_served_to_gated_email(client, monkeypatch):
+    monkeypatch.setenv("LOGSINK_ADMIN_EMAILS", "operator@example.com")
+    shim.state = shim.State()
+    resp = TestClient(shim.app).get(
+        "/admin", headers={"X-Auth-Request-Email": "operator@example.com"}
+    )
+    assert resp.status_code == 200
+    assert "logsink admin" in resp.text
 
 
 def test_admin_sets_level_used_by_config(client):

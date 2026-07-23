@@ -15,7 +15,13 @@ route (ADR-009-style exception). Everything it does:
 Config (env):
   LOGSINK_KEYS               "key1:app-one,key2:app-two"  (required for ingest)
   LOGSINK_VL_URL             default http://victorialogs-apps:9428
-  LOGSINK_ADMIN_TOKEN        unset => admin endpoints answer 503 (fail closed)
+  LOGSINK_ADMIN_EMAILS       comma-separated Entra identities allowed to use the
+                             admin UI/endpoints via the gate's X-Auth-Request-Email
+                             header (NOTE: the claim is preferred_username — the
+                             UPN — not necessarily a personal email address)
+  LOGSINK_ADMIN_TOKEN        alternative machine auth (Bearer) for scripts;
+                             with BOTH this and LOGSINK_ADMIN_EMAILS unset the
+                             admin endpoints answer 503 (fail closed)
   LOGSINK_DEFAULT_LEVEL      default INFO
   LOGSINK_LEVELS             optional seed, e.g. {"retro-fm": "DEBUG"}
   LOGSINK_RATE_LINES_PER_SEC default 50 (per app)
@@ -32,6 +38,7 @@ import time
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
@@ -51,6 +58,11 @@ class State:
                 self.keys[key.strip()] = app_name.strip()
         self.vl_url = _env("LOGSINK_VL_URL", "http://victorialogs-apps:9428")
         self.admin_token = os.environ.get("LOGSINK_ADMIN_TOKEN") or None
+        self.admin_emails = {
+            e.strip().lower()
+            for e in _env("LOGSINK_ADMIN_EMAILS", "").split(",")
+            if e.strip()
+        }
         self.default_level = _env("LOGSINK_DEFAULT_LEVEL", "INFO").upper()
         self.levels: dict[str, str] = {
             k: str(v).upper()
@@ -162,12 +174,86 @@ async def ingest(request: Request) -> Response:
 
 
 def _require_admin(request: Request) -> None:
-    # Fail closed: without a configured admin token the endpoint is unusable,
-    # never unauthenticated (same pattern as price-tracker's MCP bearer).
-    if state.admin_token is None:
+    # Two accepted identities, fail closed when neither is configured:
+    #  1. An Entra identity forwarded by the gate (X-Auth-Request-Email; the
+    #     Traefik /admin router MUST stay Entra-gated — the forwardAuth
+    #     overwrites this header, so it cannot be forged from outside).
+    #  2. A machine Bearer token for scripts (price-tracker D-24 pattern).
+    if not state.admin_emails and state.admin_token is None:
         raise HTTPException(status_code=503, detail="admin disabled")
-    if not hmac.compare_digest(state.admin_token, _bearer(request)):
-        raise HTTPException(status_code=401, detail="bad admin token")
+    email = (request.headers.get("x-auth-request-email") or "").strip().lower()
+    if email and email in state.admin_emails:
+        return
+    if state.admin_token is not None:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer ") and hmac.compare_digest(
+            state.admin_token, auth[7:].strip()
+        ):
+            return
+    raise HTTPException(status_code=401, detail="not authorized for admin")
+
+
+_ADMIN_PAGE = """<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>logsink admin</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; background: #101418; color: #e6e8eb;
+         max-width: 560px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; } .who { color: #8a939e; font-size: .85rem; }
+  .app { display: flex; align-items: center; justify-content: space-between;
+         gap: .75rem; padding: .8rem 0; border-bottom: 1px solid #232a31; flex-wrap: wrap; }
+  .name { font-weight: 600; }
+  button { font: inherit; padding: .35rem .8rem; border-radius: .5rem; cursor: pointer;
+           border: 1px solid #39424c; background: #1a2027; color: #e6e8eb; }
+  button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  #err { color: #ff7a7a; }
+</style>
+<h1>logsink admin <span class="who" id="who"></span></h1>
+<p class="who">Levels are runtime state — a shim redeploy falls back to the env seed.</p>
+<div id="apps">loading…</div>
+<p id="err"></p>
+<script>
+const LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"];
+async function refresh() {
+  const r = await fetch("/admin/levels");
+  if (!r.ok) { document.getElementById("err").textContent = "load failed: " + r.status; return; }
+  const levels = await r.json();
+  const root = document.getElementById("apps");
+  root.innerHTML = "";
+  for (const [app, level] of Object.entries(levels)) {
+    const row = document.createElement("div"); row.className = "app";
+    const name = document.createElement("span"); name.className = "name"; name.textContent = app;
+    row.appendChild(name);
+    const btns = document.createElement("span");
+    for (const l of LEVELS) {
+      const b = document.createElement("button");
+      b.textContent = l;
+      if (l === level) b.className = "on";
+      b.onclick = async () => {
+        const resp = await fetch("/admin/level/" + encodeURIComponent(app), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ level: l }),
+        });
+        document.getElementById("err").textContent = resp.ok ? "" : "save failed: " + resp.status;
+        refresh();
+      };
+      btns.appendChild(b);
+    }
+    row.appendChild(btns);
+    root.appendChild(row);
+  }
+}
+refresh();
+</script>
+"""
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request) -> HTMLResponse:
+    _require_admin(request)
+    return HTMLResponse(_ADMIN_PAGE)
 
 
 @app.get("/admin/levels")
