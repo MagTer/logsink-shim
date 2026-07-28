@@ -60,6 +60,21 @@ def test_device_field_passes_through(client, captured_vl):
     assert captured_vl["lines"][0]["device"] == "Volvo XC60"
 
 
+def test_sid_and_seq_pass_through(client, captured_vl):
+    batch = json.dumps(
+        {"msg": "hi", "level": "ERROR", "sid": "ab12cd34", "seq": 17}
+    )
+    assert client.post("/ingest", content=batch, headers=auth()).status_code == 204
+    assert captured_vl["lines"][0]["sid"] == "ab12cd34"
+    assert captured_vl["lines"][0]["seq"] == 17
+
+
+def test_malformed_seq_is_dropped_not_fatal(client, captured_vl):
+    batch = json.dumps({"msg": "hi", "level": "ERROR", "seq": "not-a-number"})
+    assert client.post("/ingest", content=batch, headers=auth()).status_code == 204
+    assert "seq" not in captured_vl["lines"][0]
+
+
 def test_drops_lines_below_configured_level(client, captured_vl):
     batch = "\n".join(
         json.dumps(e)

@@ -146,6 +146,16 @@ async def ingest(request: Request) -> Response:
             line["tag"] = str(entry["tag"])
         if "device" in entry:
             line["device"] = str(entry["device"])
+        # Client shipping diagnostics (logsink-clients @ 6c29cd0): sid is a random
+        # per-process session id, seq a per-line counter — restarts show as sid
+        # changes, lost lines as seq holes. Explicit allowlist like the rest.
+        if "sid" in entry:
+            line["sid"] = str(entry["sid"])
+        if "seq" in entry:
+            try:
+                line["seq"] = int(entry["seq"])
+            except (TypeError, ValueError):
+                pass
         if "ts" in entry:
             line["_time"] = entry["ts"]
         out_lines.append(json.dumps(line, ensure_ascii=False))
