@@ -16,8 +16,9 @@ only builds the image. See that repo's ADR for the deployment design.
   budgets are untouched. Storage-level disk caps remain the last resort.
 - **Per-app log level**: `GET /ingest/config` tells the client which levels to send;
   the shim also drops below-level lines server-side as defense in depth.
-- **Remote level control**: `PUT /admin/level/{app}` guarded by a separate admin
-  token that **fails closed** (503 when unset).
+- **Remote level control**: `PUT /admin/level/{app}` for an admin identity: an
+  allowlisted email from the ingress in front (see `AUTH_SOURCE`), or a separate
+  admin token. **Fails closed** (503 when neither is configured).
 
 ## API
 
@@ -25,8 +26,9 @@ only builds the image. See that repo's ADR for the deployment design.
 |--------|----------------------|--------------|------------------------------------|
 | POST   | `/ingest`            | app key      | Append NDJSON log lines            |
 | GET    | `/ingest/config`     | app key      | Current log level for the app      |
-| GET    | `/admin/levels`      | admin token  | All apps' levels                   |
-| PUT    | `/admin/level/{app}` | admin token  | Set an app's level                 |
+| GET    | `/admin`             | admin        | Level control page                 |
+| GET    | `/admin/levels`      | admin        | All apps' levels                   |
+| PUT    | `/admin/level/{app}` | admin        | Set an app's level                 |
 | GET    | `/healthz`           | none         | Liveness for the compose healthcheck |
 
 Ingest body: one JSON object per line — `{"ts": <epoch-ms or RFC3339>, "level": "INFO", "tag": "PlayerManager", "msg": "..."}`.
@@ -38,7 +40,11 @@ Only `msg` is required.
 |------------------------------|----------------------------------|
 | `LOGSINK_KEYS`               | — (`key1:app-one,key2:app-two`)  |
 | `LOGSINK_VL_URL`             | `http://victorialogs-apps:9428`  |
-| `LOGSINK_ADMIN_TOKEN`        | unset → admin endpoints 503      |
+| `LOGSINK_ADMIN_EMAILS`       | — (allowlisted admin identities) |
+| `LOGSINK_ADMIN_TOKEN`        | unset (+ no emails) → admin 503  |
+| `AUTH_SOURCE`                | `iap-header`: trust `X-Auth-Request-Email` (oauth2-proxy). `cf-access`: trust only a VERIFIED `Cf-Access-Jwt-Assertion` (Cloudflare Access); any other value → admin 503 |
+| `CF_ACCESS_TEAM_DOMAIN`      | — (`cf-access` only, e.g. `ternstrom.cloudflareaccess.com`) |
+| `CF_ACCESS_AUD`              | — (`cf-access` only: the host's Access application AUD) |
 | `LOGSINK_DEFAULT_LEVEL`      | `INFO`                           |
 | `LOGSINK_LEVELS`             | `{}` (JSON seed, e.g. `{"retro-fm":"DEBUG"}`) |
 | `LOGSINK_RATE_LINES_PER_SEC` | `50` per app                     |

@@ -27,6 +27,14 @@ Config (env):
   LOGSINK_RATE_LINES_PER_SEC default 50 (per app)
   LOGSINK_BURST_LINES        default 500 (per app)
   LOGSINK_MAX_BODY_BYTES     default 524288
+  AUTH_SOURCE                "iap-header" (default: Dokploy's oauth2-proxy sets
+                             X-Auth-Request-Email) or "cf-access" (behind
+                             Cloudflare Access: the admin's email comes from a
+                             VERIFIED Cf-Access-Jwt-Assertion, cf_access.py, and
+                             X-Auth-Request-Email is ignored). Read per request;
+                             any other value refuses every admin request.
+  CF_ACCESS_TEAM_DOMAIN      e.g. ternstrom.cloudflareaccess.com  (cf-access only)
+  CF_ACCESS_AUD              the host's Access application AUD    (cf-access only)
 """
 
 from __future__ import annotations
@@ -36,9 +44,21 @@ import json
 import os
 import time
 
+import logging
+
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
+from starlette.concurrency import run_in_threadpool
+
+from logsink_shim.cf_access import AccessKeyCache, AccessTokenError, verify_access_jwt
+
+logger = logging.getLogger(__name__)
+
+AUTH_SOURCES = frozenset({"iap-header", "cf-access"})
+
+# One cache per process: the keys are the team's, not the request's.
+_access_keys = AccessKeyCache()
 
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
@@ -185,15 +205,45 @@ async def ingest(request: Request) -> Response:
     return Response(status_code=204)
 
 
+def _admin_email(request: Request) -> str:
+    """The caller's email as the configured ingress asserts it, or "" for none.
+
+    iap-header: X-Auth-Request-Email, which Dokploy's forwardAuth overwrites, so the
+    Traefik /admin router MUST stay Entra-gated. cf-access: only a VERIFIED Access
+    assertion counts; X-Auth-Request-Email is ignored, since nothing in front of the
+    shim sets it there and anyone could. A service-token assertion verifies and names
+    no one (measured on home-server's lab, STATEFUL-APPS U2), so it is nobody here.
+    """
+    source = os.environ.get("AUTH_SOURCE", "iap-header")
+    if source not in AUTH_SOURCES:
+        # A typo must not fall back to the header anyone can send.
+        raise HTTPException(status_code=503, detail="AUTH_SOURCE not recognised")
+    if source == "iap-header":
+        return (request.headers.get("x-auth-request-email") or "").strip().lower()
+    team = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "")
+    audience = os.environ.get("CF_ACCESS_AUD", "")
+    assertion = request.headers.get("cf-access-jwt-assertion")
+    if not team or not audience or not assertion:
+        return ""
+    try:
+        claims = verify_access_jwt(
+            assertion, team_domain=team, audience=audience, keys=_access_keys
+        )
+    except AccessTokenError as exc:
+        # The reason is logged and never returned; it never contains the token.
+        logger.warning("Access assertion refused: %s", exc)
+        return ""
+    email = claims.get("email")
+    return email.strip().lower() if isinstance(email, str) else ""
+
+
 def _require_admin(request: Request) -> None:
     # Two accepted identities, fail closed when neither is configured:
-    #  1. An Entra identity forwarded by the gate (X-Auth-Request-Email; the
-    #     Traefik /admin router MUST stay Entra-gated — the forwardAuth
-    #     overwrites this header, so it cannot be forged from outside).
+    #  1. An Entra identity from the configured ingress (_admin_email).
     #  2. A machine Bearer token for scripts (price-tracker D-24 pattern).
     if not state.admin_emails and state.admin_token is None:
         raise HTTPException(status_code=503, detail="admin disabled")
-    email = (request.headers.get("x-auth-request-email") or "").strip().lower()
+    email = _admin_email(request)
     if email and email in state.admin_emails:
         return
     if state.admin_token is not None:
@@ -203,6 +253,12 @@ def _require_admin(request: Request) -> None:
         ):
             return
     raise HTTPException(status_code=401, detail="not authorized for admin")
+
+
+async def _admin(request: Request) -> None:
+    # In the threadpool: a cf-access check can fetch the team's certs synchronously
+    # (up to its 5 s timeout), which on the event loop would stall /ingest as well.
+    await run_in_threadpool(_require_admin, request)
 
 
 _ADMIN_PAGE = """<!doctype html>
@@ -264,20 +320,20 @@ refresh();
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request) -> HTMLResponse:
-    _require_admin(request)
+    await _admin(request)
     return HTMLResponse(_ADMIN_PAGE)
 
 
 @app.get("/admin/levels")
 async def get_levels(request: Request) -> dict:
-    _require_admin(request)
+    await _admin(request)
     apps = sorted(set(state.keys.values()))
     return {a: state.level_for(a) for a in apps}
 
 
 @app.put("/admin/level/{app_name}")
 async def set_level(app_name: str, request: Request) -> dict:
-    _require_admin(request)
+    await _admin(request)
     payload = await request.json()
     level = str(payload.get("level", "")).upper()
     if level not in LEVELS:
