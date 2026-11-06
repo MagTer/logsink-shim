@@ -7,12 +7,16 @@ verifier itself is price-tracker's (cf_access.py says so), so its own edge cases
 covered again here only where the shim could wire them wrongly.
 """
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 from joserfc import jwt
-from joserfc.jwk import KeySet, OctKey, RSAKey
+from joserfc.jwk import KeySet, RSAKey
 
 import logsink_shim.app as shim
 from logsink_shim.cf_access import AccessKeyCache
@@ -26,7 +30,7 @@ SIGNING_KEY = RSAKey.generate_key(2048, parameters={"kid": "k1"})
 FORGER_KEY = RSAKey.generate_key(2048, parameters={"kid": "k1"})
 
 
-def token(*, key: RSAKey | OctKey = SIGNING_KEY, alg: str = "RS256", **overrides) -> str:
+def claims_for(**overrides) -> dict:
     now = int(time.time())
     claims = {
         "aud": [AUD],
@@ -39,8 +43,23 @@ def token(*, key: RSAKey | OctKey = SIGNING_KEY, alg: str = "RS256", **overrides
         "type": "app",
     }
     claims.update(overrides)
-    claims = {k: v for k, v in claims.items() if v is not None}
-    return jwt.encode({"alg": alg, "kid": "k1"}, claims, key, algorithms=[alg])
+    return {k: v for k, v in claims.items() if v is not None}
+
+
+def token(*, key: RSAKey = SIGNING_KEY, **overrides) -> str:
+    return jwt.encode({"alg": "RS256", "kid": "k1"}, claims_for(**overrides), key, algorithms=["RS256"])
+
+
+def hs256_forgery(secret: bytes) -> str:
+    # By hand, because an attacker needs no JOSE library: joserfc 1.8.0 refuses a public
+    # key as an oct key, which made this test fail in its own setup.
+    def part(data: bytes) -> bytes:
+        return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+    header = part(json.dumps({"alg": "HS256", "kid": "k1"}).encode())
+    payload = part(json.dumps(claims_for()).encode())
+    signature = hmac.new(secret, header + b"." + payload, hashlib.sha256).digest()
+    return (header + b"." + payload + b"." + part(signature)).decode()
 
 
 @pytest.fixture
@@ -119,8 +138,7 @@ class TestRefused:
         assert levels(client, token(key=FORGER_KEY)).status_code == 401
 
     def test_hs256_with_the_public_key_as_secret(self, client):
-        secret = OctKey.import_key(SIGNING_KEY.as_pem(private=False))
-        assert levels(client, token(key=secret, alg="HS256")).status_code == 401
+        assert levels(client, hs256_forgery(SIGNING_KEY.as_pem(private=False))).status_code == 401
 
     def test_wrong_issuer(self, client):
         assert levels(client, token(iss="https://evil.cloudflareaccess.com")).status_code == 401
