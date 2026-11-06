@@ -61,3 +61,7 @@ uvicorn logsink_shim.app:app --reload
 
 Releases: push a `v*` tag → GitHub Actions runs tests and pushes
 `ghcr.io/magter/logsink-shim:<tag>`.
+
+Changes reach `main` through a pull request. `pytest` and the model review run on every PR, and a
+draft is not reviewed until it is marked ready. A `v*` tag publishes the image, so tag a commit that is
+already on `main`.
