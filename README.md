@@ -1,3 +1,9 @@
+---
+purpose: A small auth and quota edge in front of VictoriaLogs for apps that cannot complete an SSO login.
+owns: [the logsink-shim image]
+does_not_own: [its deployment (home-server)]
+depends_on: []
+---
 # logsink-shim
 
 Tiny auth/quota edge that sits in front of a [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)
